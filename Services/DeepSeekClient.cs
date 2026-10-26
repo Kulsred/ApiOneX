@@ -14,9 +14,7 @@ public sealed class DeepSeekClient(HttpClient http, IPowSolver pow, StreamParser
     {
         if (!Models.Contains(request.Model)) throw new ProxyException(400, "Unsupported model. See /v1/models.");
         if (request.Messages is not { Count: > 0 }) throw new ProxyException(400, "messages must not be empty.");
-        foreach (var message in request.Messages)
-            if (message is null || message.Role is not ("system" or "user" or "assistant") || message.Content.ValueKind != JsonValueKind.String)
-                throw new ProxyException(400, "Only system/user/assistant messages with string content are supported.");
+        ChatCompatibility.Validate(request);
         if (request.Extra is { Count: > 0 })
             throw new ProxyException(400, "Unsupported parameters: " + string.Join(", ", request.Extra.Keys));
     }
@@ -32,7 +30,7 @@ public sealed class DeepSeekClient(HttpClient http, IPowSolver pow, StreamParser
         var challenge = challengeResult.GetProperty("data").GetProperty("biz_data").GetProperty("challenge");
         var proof = await pow.SolveAsync(challenge, ct);
         // A new remote session per request isolates concurrent clients. Replay complete local history.
-        var prompt = string.Join("\n\n", request.Messages.Select(m => $"{m.Role}:\n{m.Content.GetString()}"));
+        var prompt = ChatCompatibility.BuildPrompt(request);
         using var message = new HttpRequestMessage(HttpMethod.Post, CompletionPath)
         {
             Content = JsonContent.Create(new

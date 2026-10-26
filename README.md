@@ -110,11 +110,11 @@ https://learn.microsoft.com/en-us/aspnet/core/fundamentals/http-requests?view=as
 
 StreamParser читает UTF-8 через StreamReader, собирает многострочные data frames, игнорирует SSE comments, применяет initial response, fragments APPEND, patch operations, continuation без p и отдельные THINK/REASONING фрагменты. В OpenAI потоке reasoning идет в `delta.reasoning_content`, ответ — в `delta.content`. Все чанки имеют стабильные id/created/model. При успешном завершении отправляются finish_reason=stop и `[DONE]`.
 
-stream=false собирает те же TextDelta в `chat.completion`. Данные usage не выдумываются: поле отсутствует. Исходный произвольный finish_reason сейчас нормализуется в stop; это базовая совместимость текстового чата.
+stream=false собирает те же TextDelta в `chat.completion`. Для обычного ответа finish_reason=stop, для вызовов инструментов — tool_calls. Точные данные usage недоступны: возвращается null. При stream_options.include_usage=true перед [DONE] отправляется дополнительный chunk с choices=[] и usage=null. Заголовок X-ApiOneX-Usage: unavailable явно сообщает об этом.
 
 Модели — локальные псевдонимы режимов Web API (`model_type=default`, thinking/search flags), а не гарантия конкретной версии весов DeepSeek. Сессия новая на каждый completion, история передается текстом с метками ролей. Это не нативная структурированная семантика OpenAI system messages. Созданные сессии остаются в аккаунте; pooling/удаление удаленных сессий пока не реализовано.
 
-Принимаются только model, messages и stream; messages — system/user/assistant со строковым content. temperature, max_tokens, tools, tool_choice, изображения, stream_options и прочие дополнительные параметры возвращают 400, чтобы клиент не считал их примененными. `/v1/messages` не реализован: полноценный Claude Code потребует tool_use/tool_result, маршрутизации инструментов и Anthropic SSE. Это не полный перенос agentic-функций большого server.js.
+Поддерживаются model, messages, stream, stream_options, store, max_completion_tokens/max_tokens, tools, tool_choice, parallel_tool_calls, temperature, top_p, user, metadata и n=1. Роли: system/developer/user/assistant/tool; content — строка или массив text parts. Assistant с tool_calls может иметь null content. Неизвестные поля и изображения по-прежнему возвращают 400. `/v1/messages` не реализован: для Anthropic нужны отдельные DTO и SSE.
 
 `/health` проверяет только локальную работоспособность и наличие валидной конфигурации при старте. Он не проверяет актуальность токена, captcha или доступность DeepSeek. Приложение не выполняет браузерную аутентификацию. HTTP 401/403/429 upstream передаются клиенту; подробное содержимое ответа upstream не раскрывается.
 
@@ -129,3 +129,13 @@ dotnet run --project Tests/Smoke.csproj
 ## Консольный интерфейс
 
 При запуске — ASCII-логотип ApiOneX с анимацией появления и световым проходом, cyan/violet палитра и подпись kulsred dev :3. Курсор восстанавливается после анимации. При перенаправлении stdout или NO_COLOR используется статичный ASCII без ANSI. Баннер показывает адрес конфигурации; успешный запуск сервера подтверждается стандартным сообщением Now listening on.
+
+## Совместимость с инструментами и параметрами клиентов
+
+Web API DeepSeek не предоставляет нативного function calling. ChatCompatibility передает объявления function tools и историю assistant.tool_calls/tool messages в prompt, а затем преобразует специальный текстовый envelope в OpenAI tool_calls. Код прокси сам инструменты не выполняет: это делает ваш клиент.
+
+Поддерживаются tool_choice auto/none/required и выбор именованной функции; parallel_tool_calls=false требует один вызов. В ответах возвращаются уникальные call_id, JSON-строка arguments и finish_reason=tool_calls. В SSE каждый вызов имеет index. Контент в режиме tools буферизуется до завершения, чтобы не отправить протокольный envelope как обычный текст; reasoning продолжает стримиться. Незаявленные функции, невалидный JSON и отсутствие обязательного вызова дают ошибку upstream. Полная проверка arguments по JSON Schema пока не выполняется; клиент обязан валидировать аргументы перед исполнением. Соблюдение протокола зависит от модели, это не native structured outputs/strict mode.
+
+max_completion_tokens/max_tokens используются как инструкция модели, а не жесткий лимит генерации: X-ApiOneX-Token-Limit: prompt-hint. temperature/top_p принимаются и проверяются на допустимый диапазон, но Web API использует свои настройки: X-ApiOneX-Sampling: web-default. store/user/metadata принимаются для совместимости, локального хранилища нет (X-ApiOneX-Storage: disabled). Это не обещание управления историей на стороне DeepSeek: удаленные Web-сессии создаются как раньше.
+
+Проверки используют fake upstream, реальные запросы к аккаунту DeepSeek не выполняются. Дополнительно покрыты параметры из клиентского запроса, tool calls в JSON и SSE, сериализация arguments, include_usage, round trip tool result, tool_choice и ошибки протокола.

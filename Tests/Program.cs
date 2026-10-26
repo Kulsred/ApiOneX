@@ -43,6 +43,7 @@ var builder = WebApplication.CreateBuilder();
 builder.Logging.ClearProviders();
 builder.WebHost.UseUrls("http://127.0.0.1:0");
 builder.Services.AddSingleton(client);
+builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
 await using (var app = builder.Build())
 {
     app.MapChatEndpoints();
@@ -58,6 +59,50 @@ await using (var app = builder.Build())
     using var streaming = await http.PostAsJsonAsync("/v1/chat/completions", request with { Stream = true }, Wire.Json);
     var sse = await streaming.Content.ReadAsStringAsync();
     Check(streaming.Content.Headers.ContentType!.MediaType == "text/event-stream" && sse.Contains("\"content\":\"ok\"") && sse.EndsWith("data: [DONE]\n\n"), "stream endpoint");
+    var toolRequest = JsonSerializer.Deserialize<ChatRequest>("""
+        {"model":"deepseek-reasoner","messages":[{"role":"developer","content":[{"type":"text","text":"Help with files"}]},{"role":"user","content":"Read hello.txt"}],
+        "stream_options":{"include_usage":true},"store":false,"max_completion_tokens":2048,
+        "tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],
+        "tool_choice":"required","parallel_tool_calls":false}
+        """, Wire.Json)!;
+    DeepSeekClient.Validate(toolRequest);
+    Check(ChatCompatibility.BuildPrompt(toolRequest).Contains("read_file") && ChatCompatibility.BuildPrompt(toolRequest).Contains("2048"), "client parameters and tool prompt");
+    handler.Reply = ChatCompatibility.OpenMarker + "{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"hello.txt\"}}]}" + ChatCompatibility.CloseMarker;
+    using var toolResponse = await http.PostAsJsonAsync("/v1/chat/completions", toolRequest, Wire.Json);
+    var toolJson = JsonDocument.Parse(await toolResponse.Content.ReadAsStringAsync());
+    var toolChoice = toolJson.RootElement.GetProperty("choices")[0];
+    var assistant = toolChoice.GetProperty("message").Deserialize<ChatMessage>(Wire.Json)!;
+    var callId = assistant.ToolCalls![0].Id;
+    Check(toolResponse.IsSuccessStatusCode && toolChoice.GetProperty("finish_reason").GetString() == "tool_calls" && assistant.ToolCalls[0].Function.Name == "read_file" && assistant.Content.ValueKind == JsonValueKind.Null, "non-stream tool_calls response");
+    Check(JsonDocument.Parse(assistant.ToolCalls[0].Function.Arguments).RootElement.GetProperty("path").GetString() == "hello.txt", "JSON tool arguments");
+    using var toolStreamResponse = await http.PostAsJsonAsync("/v1/chat/completions", toolRequest with { Stream = true }, Wire.Json);
+    var toolSse = await toolStreamResponse.Content.ReadAsStringAsync();
+    var chunks = new List<JsonElement>();
+    await foreach (var frame in StreamParser.ReadFramesAsync(new MemoryStream(Encoding.UTF8.GetBytes(toolSse)), default))
+        if (frame != "[DONE]") chunks.Add(JsonDocument.Parse(frame).RootElement.Clone());
+    var callChunk = chunks.Single(c => c.GetProperty("choices").GetArrayLength() > 0 && c.GetProperty("choices")[0].GetProperty("delta").TryGetProperty("tool_calls", out _));
+    Check(callChunk.GetProperty("choices")[0].GetProperty("delta").GetProperty("tool_calls")[0].GetProperty("index").GetInt32() == 0 &&
+        chunks.Any(c => c.GetProperty("choices").GetArrayLength() > 0 && c.GetProperty("choices")[0].GetProperty("finish_reason").GetString() == "tool_calls"), "SSE tool_calls indexes and finish reason");
+    Check(chunks[^1].GetProperty("choices").GetArrayLength() == 0 && chunks[^1].GetProperty("usage").ValueKind == JsonValueKind.Null && toolSse.EndsWith("data: [DONE]\n\n"), "include_usage without invented counts");
+    handler.Reply = "The file says hello.";
+    var followup = toolRequest with
+    {
+        ToolChoice = JsonSerializer.SerializeToElement("auto"),
+        Messages = [..toolRequest.Messages, assistant, new("tool", JsonSerializer.SerializeToElement("hello")) { ToolCallId = callId }]
+    };
+    using var followupResponse = await http.PostAsJsonAsync("/v1/chat/completions", followup, Wire.Json);
+    Check(followupResponse.IsSuccessStatusCode && handler.LastPrompt.Contains(callId) && handler.LastPrompt.Contains("tool:\n") &&
+        (await followupResponse.Content.ReadAsStringAsync()).Contains("The file says hello."), "assistant tool call and tool result round trip");
+    var noTools = toolRequest with { ToolChoice = JsonSerializer.SerializeToElement("none") };
+    Check(!ChatCompatibility.CanCallTools(noTools), "tool_choice none");
+    try { ChatCompatibility.ParseToolCalls(toolRequest, "ordinary reply"); throw new Exception("Missing required call error"); }
+    catch (ProxyException) { Console.WriteLine("PASS required tool enforcement"); }
+    try { ChatCompatibility.ParseToolCalls(toolRequest, ChatCompatibility.OpenMarker + "{\"tool_calls\":[{\"name\":\"undeclared\",\"arguments\":{}}]}" + ChatCompatibility.CloseMarker); throw new Exception("Missing unknown tool error"); }
+    catch (ProxyException) { Console.WriteLine("PASS undeclared tool rejection"); }
+    try { ChatCompatibility.ParseToolCalls(toolRequest, ChatCompatibility.OpenMarker + "broken"); throw new Exception("Missing broken tool error"); }
+    catch (ProxyException) { Console.WriteLine("PASS incomplete envelope rejection"); }
+    var automatic = toolRequest with { ToolChoice = JsonSerializer.SerializeToElement("auto") };
+    Check(ChatCompatibility.ParseToolCalls(automatic, "Example JSON: {\"name\":\"read_file\"}").Count == 0, "ordinary text is not treated as a tool call");
     await app.StopAsync();
 }
 static async Task ParseCancelled(CancellationToken ct)
@@ -71,6 +116,8 @@ sealed class FakePow : IPowSolver
 sealed class FakeHandler : HttpMessageHandler
 {
     public int Calls;
+    public string Reply = "ok";
+    public string LastPrompt = "";
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken ct)
     {
         Calls++;
@@ -79,13 +126,14 @@ sealed class FakeHandler : HttpMessageHandler
         {
             "/api/v0/chat_session/create" => "{\"data\":{\"biz_data\":{\"chat_session\":{\"id\":\"test\"}}}}",
             "/api/v0/chat/create_pow_challenge" => "{\"data\":{\"biz_data\":{\"challenge\":{}}}}",
-            DeepSeekClient.CompletionPath => "data: {\"p\":\"response/content\",\"v\":\"ok\"}\n\ndata: [DONE]\n\n",
+            DeepSeekClient.CompletionPath => "data: " + JsonSerializer.Serialize(new { p = "response/content", v = Reply }) + "\n\ndata: [DONE]\n\n",
             _ => throw new Exception("Unexpected route")
         };
         if (path == DeepSeekClient.CompletionPath)
         {
             if (r.Headers.GetValues("x-ds-pow-response").Single() != "proof") throw new Exception("PoW header");
             var body = JsonDocument.Parse(await r.Content!.ReadAsStringAsync(ct));
+            LastPrompt = body.RootElement.GetProperty("prompt").GetString()!;
             if (!body.RootElement.GetProperty("thinking_enabled").GetBoolean()) throw new Exception("Reasoning mode");
         }
         return new(HttpStatusCode.OK) { Content = new StringContent(text, Encoding.UTF8, path == DeepSeekClient.CompletionPath ? "text/event-stream" : "application/json") };

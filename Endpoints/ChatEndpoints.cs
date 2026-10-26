@@ -32,6 +32,13 @@ public static class ChatEndpoints
         var id = "chatcmpl-" + Guid.NewGuid().ToString("N");
         var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var content = new StringBuilder(); var reasoning = new StringBuilder();
+        var bufferTools = ChatCompatibility.CanCallTools(request);
+        context.Response.Headers["X-ApiOneX-Usage"] = "unavailable";
+        context.Response.Headers["X-ApiOneX-Storage"] = "disabled";
+        if (request.MaxCompletionTokens is not null || request.MaxTokens is not null)
+            context.Response.Headers["X-ApiOneX-Token-Limit"] = "prompt-hint";
+        if (request.Temperature is not null || request.TopP is not null)
+            context.Response.Headers["X-ApiOneX-Sampling"] = "web-default";
         await foreach (var delta in client.CompleteAsync(request, ct))
         {
             if (!request.Stream) { content.Append(delta.Content); reasoning.Append(delta.Reasoning); continue; }
@@ -42,21 +49,47 @@ public static class ChatEndpoints
                 context.Response.Headers["X-Accel-Buffering"] = "no";
                 await SendAsync(context, Chunk(new { role = "assistant" }), ct);
             }
-            if (delta.Content.Length > 0) await SendAsync(context, Chunk(new { content = delta.Content }), ct);
+            if (bufferTools) content.Append(delta.Content);
+            else if (delta.Content.Length > 0) await SendAsync(context, Chunk(new { content = delta.Content }), ct);
             if (delta.Reasoning.Length > 0) await SendAsync(context, Chunk(new { reasoning_content = delta.Reasoning }), ct);
         }
+        var toolCalls = ChatCompatibility.ParseToolCalls(request, content.ToString());
+        var finishReason = toolCalls.Count > 0 ? "tool_calls" : "stop";
         if (request.Stream)
         {
-            if (!context.Response.HasStarted) context.Response.ContentType = "text/event-stream; charset=utf-8";
+            if (!context.Response.HasStarted)
+            {
+                context.Response.ContentType = "text/event-stream; charset=utf-8";
+                context.Response.Headers.CacheControl = "no-cache";
+                context.Response.Headers["X-Accel-Buffering"] = "no";
+                await SendAsync(context, Chunk(new { role = "assistant" }), ct);
+            }
+            if (toolCalls.Count > 0)
+                for (var index = 0; index < toolCalls.Count; index++)
+                {
+                    var call = toolCalls[index];
+                    await SendAsync(context, Chunk(new { tool_calls = new[] { new { index, call.Id, call.Type, call.Function } } }), ct);
+                }
+            else if (bufferTools && content.Length > 0) await SendAsync(context, Chunk(new { content = content.ToString() }), ct);
             await SendAsync(context, new { id, @object = "chat.completion.chunk", created, model = request.Model,
-                choices = new[] { new { index = 0, delta = new { }, finish_reason = "stop" } } }, ct);
+                choices = new[] { new { index = 0, delta = new { }, finish_reason = finishReason } } }, ct);
+            if (request.StreamOptions?.IncludeUsage == true)
+                await SendAsync(context, new { id, @object = "chat.completion.chunk", created, model = request.Model,
+                    choices = Array.Empty<object>(), usage = (object?)null }, ct);
             await context.Response.WriteAsync("data: [DONE]\n\n", ct);
             await context.Response.Body.FlushAsync(ct);
         }
         else
+        {
+            var message = new Dictionary<string, object?>
+            {
+                ["role"] = "assistant", ["content"] = toolCalls.Count > 0 ? null : content.ToString(),
+                ["reasoning_content"] = reasoning.ToString()
+            };
+            if (toolCalls.Count > 0) message["tool_calls"] = toolCalls;
             await context.Response.WriteAsJsonAsync(new { id, @object = "chat.completion", created, model = request.Model,
-                choices = new[] { new { index = 0, message = new { role = "assistant", content = content.ToString(),
-                    reasoning_content = reasoning.ToString() }, finish_reason = "stop" } } }, Wire.Json, ct);
+                choices = new[] { new { index = 0, message, finish_reason = finishReason } }, usage = (object?)null }, Wire.Json, ct);
+        }
 
         object Chunk(object delta) => new { id, @object = "chat.completion.chunk", created, model = request.Model,
             choices = new[] { new { index = 0, delta, finish_reason = (string?)null } } };
