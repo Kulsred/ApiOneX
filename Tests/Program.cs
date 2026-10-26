@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
 
 static void Check(bool condition, string name) { if (!condition) throw new Exception(name); Console.WriteLine("PASS " + name); }
+await PowChecks.RunAsync();
 static async Task<List<TextDelta>> Parse(string s)
 {
     await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(s));

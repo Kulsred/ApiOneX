@@ -46,7 +46,7 @@ dotnet run --no-build
 ```
 
 Приложение по умолчанию слушает `http://127.0.0.1:3001`; Node-прокси может продолжать использовать свой порт.
-Нужны .NET 8 SDK и Node.js >= 18 (проверено с Node 24). `global.json` выбирает установленный здесь SDK 8.0.400. На другой машине выберите свой установленный SDK 8 или 9; TargetFramework может остаться net8.0. NuGet.Config очищает внешние источники: проект использует только ASP.NET Core shared framework.
+Нужны .NET 8 SDK и Node.js >= 22.19 либо >= 24.6 (проверено с Node 24.13.1). `global.json` выбирает установленный здесь SDK 8.0.400. На другой машине выберите свой установленный SDK 8 или 9; TargetFramework может остаться net8.0. NuGet.Config очищает внешние источники: проект использует только ASP.NET Core shared framework.
 
 Auth-файл по умолчанию читается из `deepseek-auth.json` в корне приложения. Секреты не копируются в новый проект и не выводятся в логи. Для другого расположения:
 
@@ -124,7 +124,7 @@ stream=false собирает те же TextDelta в `chat.completion`. Для �
 dotnet run --project Tests/Smoke.csproj
 ```
 
-Покрыты Unicode, reasoning patches, multiline SSE, EOF, ошибка upstream, обрыв без completion marker, cancellation и pipeline session → challenge → completion через fake HttpMessageHandler. Live-запросы с вашей сессией и загрузка реального WASM при разработке не выполнялись; реальная работа с DeepSeek зависит от действительности auth и текущего Web API.
+Покрыты Unicode, reasoning patches, multiline SSE, EOF, ошибка upstream, обрыв без completion marker, cancellation и pipeline session → challenge → completion через fake HttpMessageHandler. После исправления TLS выполнена реальная проверка WASM → PoW → completion: DeepSeek вернул OK. Работа зависит от действительности auth и текущего Web API.
 
 ## Консольный интерфейс
 
@@ -138,4 +138,11 @@ Web API DeepSeek не предоставляет нативного function cal
 
 max_completion_tokens/max_tokens используются как инструкция модели, а не жесткий лимит генерации: X-ApiOneX-Token-Limit: prompt-hint. temperature/top_p принимаются и проверяются на допустимый диапазон, но Web API использует свои настройки: X-ApiOneX-Sampling: web-default. store/user/metadata принимаются для совместимости, локального хранилища нет (X-ApiOneX-Storage: disabled). Это не обещание управления историей на стороне DeepSeek: удаленные Web-сессии создаются как раньше.
 
-Проверки используют fake upstream, реальные запросы к аккаунту DeepSeek не выполняются. Дополнительно покрыты параметры из клиентского запроса, tool calls в JSON и SSE, сериализация arguments, include_usage, round trip tool result, tool_choice и ошибки протокола.
+Автоматические проверки используют fake upstream и не обращаются к аккаунту. Отдельно выполнен короткий live smoke-test текстового completion. Дополнительно покрыты параметры из клиентского запроса, tool calls в JSON и SSE, сериализация arguments, include_usage, round trip tool result, tool_choice и ошибки протокола.
+## PoW и системные сертификаты
+
+NodePowSolver по умолчанию передает дочернему процессу NODE_USE_SYSTEM_CA=1. Это позволяет Node использовать системные доверенные CA, как .NET/Windows. Если CDN доступен в браузере, но Node сообщает SELF_SIGNED_CERT_IN_CHAIN, эта настройка устраняет расхождение доверенных CA. Проверка TLS остается включенной. Требуется Node >=22.19 или >=24.6; для более старого Node можно задать NODE_EXTRA_CA_CERTS с доверенным PEM-файлом. Настройку можно отключить через DeepSeek__UseSystemCa=false.
+
+Документация Node: https://nodejs.org/api/cli.html#node_use_system_ca1
+
+Ошибки решателя теперь разделены: сертификаты TLS, скачивание/таймаут WASM, неподдерживаемый алгоритм, несовместимые exports и отсутствие решения. Сырой stderr и содержимое auth клиенту не возвращаются.
