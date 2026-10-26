@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "ApiOneX": {
+      "commandName": "Project",
+      "launchBrowser": false,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "http://127.0.0.1:3001"
+    }
+  }
+}

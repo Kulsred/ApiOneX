@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup><AssemblyName>ApiOneX</AssemblyName><RootNamespace>ApiOneX</RootNamespace><Product>ApiOneX</Product><Authors>kulsred dev</Authors><Description>ApiOneX — DeepSeek Web API proxy by kulsred dev :3</Description><TargetFramework>net8.0</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><DefaultItemExcludes>$(DefaultItemExcludes);Tests\**</DefaultItemExcludes></PropertyGroup>
+  <ItemGroup><Content Include="Scripts\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" /></ItemGroup>
+  <ItemGroup><Compile Remove="Tests\**" /></ItemGroup>
+</Project>

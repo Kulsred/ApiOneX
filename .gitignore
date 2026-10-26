@@ -1,0 +1,11 @@
+bin/
+obj/
+**/bin/
+**/obj/
+deepseek-auth.json
+*.user
+
+.env
+.env.*
+*.log
+

@@ -1,0 +1,6 @@
+{
+  "token": "YOUR_TOKEN",
+  "cookies": "ds_session_id=YOUR_SESSION; smidV2=YOUR_SMID",
+  "wasmUrl": "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm",
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+}
